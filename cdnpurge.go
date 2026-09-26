@@ -165,7 +165,7 @@ type target struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.0" }
+func (p *Plugin) Version() string { return "0.1.1" }
 
 var _ collage.CacheInvalidateHook = (*Plugin)(nil)
 

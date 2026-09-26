@@ -1,0 +1,91 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Elagoht/collage-snippets-highlighter/main/schemas/collage-plugin-manifest.schema.json",
+  "name": "elagoht/cdnpurge",
+  "description": "A collage plugin that purges a CDN's copies of the pages collage invalidates.",
+  "repository": "https://github.com/Elagoht/collage-cdnpurge",
+  "config": {
+    "type": "object",
+    "description": "A collage plugin that purges a CDN's copies of the pages collage invalidates.",
+    "properties": {
+      "backoff": {
+        "type": "string",
+        "description": "Backoff is the wait before the first retry, doubled before each one after it. A 429's Retry-After, when longer, is honoured instead. Default \"1s\".",
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
+        ]
+      },
+      "baseURL": {
+        "type": "string",
+        "description": "BaseURL is the public origin the CDN serves the site at, \"https://example.com\": collage names paths, and a CDN purges URLs. Required."
+      },
+      "cloudflare": {
+        "type": "object",
+        "description": "Cloudflare purges a Cloudflare zone. At least one of Cloudflare and Webhook is required; with both, both are purged.",
+        "properties": {
+          "apiToken": {
+            "type": "string",
+            "description": "APIToken is an API token with the Zone → Cache Purge permission for the zone. Required. Keep it out of a configuration file under version control."
+          },
+          "batchSize": {
+            "type": "integer",
+            "description": "BatchSize is how many URLs one purge request carries. Default 30, which is what every Cloudflare plan accepts; an Enterprise zone takes more."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Endpoint is the API's base URL. Default \"https://api.cloudflare.com\"."
+          },
+          "zoneID": {
+            "type": "string",
+            "description": "ZoneID is the zone's identifier, on the zone's overview page. Required."
+          }
+        }
+      },
+      "force": {
+        "type": "boolean",
+        "description": "Force purges from a development server too, which otherwise purges nothing."
+      },
+      "retries": {
+        "type": "integer",
+        "description": "Retries is how many times a request the CDN answered 429 or 5xx, or that did not reach it, is tried again. Default 4; negative tries once."
+      },
+      "timeout": {
+        "type": "string",
+        "description": "Timeout bounds one request to the CDN. Default \"10s\".",
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
+        ]
+      },
+      "webhook": {
+        "type": "object",
+        "description": "Webhook posts the URLs to an endpoint of your own, or of a CDN whose API takes a list of URLs.",
+        "properties": {
+          "batchSize": {
+            "type": "integer",
+            "description": "BatchSize is how many URLs one request carries. Default: all of them."
+          },
+          "token": {
+            "type": "string",
+            "description": "Token, when set, is sent as \"Authorization: Bearer <token>\"."
+          },
+          "url": {
+            "type": "string",
+            "description": "URL receives the POST. Required."
+          }
+        }
+      },
+      "window": {
+        "type": "string",
+        "description": "Window is how long invalidations are collected before they are sent, so a burst of them is one request. Default \"2s\".",
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
+        ]
+      }
+    }
+  }
+}
