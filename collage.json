@@ -8,12 +8,20 @@
     "description": "A collage plugin that purges a CDN's copies of the pages collage invalidates.",
     "properties": {
       "backoff": {
-        "type": "string",
         "description": "Backoff is the wait before the first retry, doubled before each one after it. A 429's Retry-After, when longer, is honoured instead. Default \"1s\".",
-        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
-        "examples": [
-          "30s",
-          "5m"
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+            "examples": [
+              "30s",
+              "5m"
+            ]
+          },
+          {
+            "type": "integer",
+            "description": "nanoseconds"
+          }
         ]
       },
       "baseURL": {
@@ -40,7 +48,8 @@
             "type": "string",
             "description": "ZoneID is the zone's identifier, on the zone's overview page. Required."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "force": {
         "type": "boolean",
@@ -51,12 +60,20 @@
         "description": "Retries is how many times a request the CDN answered 429 or 5xx, or that did not reach it, is tried again. Default 4; negative tries once."
       },
       "timeout": {
-        "type": "string",
         "description": "Timeout bounds one request to the CDN. Default \"10s\".",
-        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
-        "examples": [
-          "30s",
-          "5m"
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+            "examples": [
+              "30s",
+              "5m"
+            ]
+          },
+          {
+            "type": "integer",
+            "description": "nanoseconds"
+          }
         ]
       },
       "webhook": {
@@ -69,23 +86,33 @@
           },
           "token": {
             "type": "string",
-            "description": "Token, when set, is sent as \"Authorization: Bearer <token>\"."
+            "description": "Token, when set, is sent as \"Authorization: Bearer \u003ctoken\u003e\"."
           },
           "url": {
             "type": "string",
             "description": "URL receives the POST. Required."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "window": {
-        "type": "string",
         "description": "Window is how long invalidations are collected before they are sent, so a burst of them is one request. Default \"2s\".",
-        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
-        "examples": [
-          "30s",
-          "5m"
+        "anyOf": [
+          {
+            "type": "string",
+            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+            "examples": [
+              "30s",
+              "5m"
+            ]
+          },
+          {
+            "type": "integer",
+            "description": "nanoseconds"
+          }
         ]
       }
-    }
+    },
+    "additionalProperties": false
   }
 }
