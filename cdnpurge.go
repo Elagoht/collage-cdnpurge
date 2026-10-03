@@ -180,6 +180,11 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	}
 	p.logger = host.Logger()
 	o := &p.opts
+	// The plugin's own BaseURL wins, for every entry. Without one, each entry is
+	// purged under the origin collage names for its host — a resolver plugin's,
+	// else Config.BaseURL — so a tenant site that also sets Config.BaseURL still
+	// purges each tenant's URLs under the tenant's origin.
+	origins, resolves := host.(collage.Origins)
 	switch {
 	case o.BaseURL != "":
 		base, err := url.Parse(o.BaseURL)
@@ -187,10 +192,10 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 			return ErrNoBaseURL
 		}
 		p.base = strings.TrimSuffix(o.BaseURL, "/")
+	case resolves && (origins.Dynamic() || host.BaseURL() != ""):
+		p.origins = origins
 	case host.BaseURL() != "":
 		p.base = strings.TrimSuffix(host.BaseURL(), "/")
-	case canResolve(host):
-		p.origins, _ = host.(collage.Origins)
 	default:
 		return ErrNoBaseURL
 	}
@@ -336,20 +341,35 @@ func (p *Plugin) OnCacheInvalidate(ctx context.Context, ev *collage.CacheInvalid
 	if !p.enabled || len(ev.Entries) == 0 {
 		return nil
 	}
+	// Origins are named before the lock, once per host: OriginFor may be a
+	// resolver's I/O, which must hold up neither a flush nor another
+	// invalidation, and a resolver that invalidates in turn would deadlock.
+	urls := make([]string, 0, len(ev.Entries))
+	byHost := make(map[string]string)
+	for _, entry := range ev.Entries {
+		origin := p.base
+		if origin == "" && p.origins != nil {
+			var named bool
+			if origin, named = byHost[entry.Host]; !named {
+				origin = p.origins.OriginFor(ctx, entry.Host)
+				byHost[entry.Host] = origin
+			}
+		}
+		if origin == "" {
+			continue
+		}
+		urls = append(urls, absolute(origin, entry.Path))
+	}
+	if len(urls) == 0 {
+		return nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return nil
 	}
-	for _, entry := range ev.Entries {
-		origin := p.base
-		if origin == "" && p.origins != nil {
-			origin = p.origins.OriginFor(ctx, entry.Host)
-		}
-		if origin == "" {
-			continue
-		}
-		p.pending[absolute(origin, entry.Path)] = struct{}{}
+	for _, u := range urls {
+		p.pending[u] = struct{}{}
 	}
 	if p.timer == nil {
 		p.timer = time.AfterFunc(time.Duration(p.opts.Window), p.flush)
@@ -361,17 +381,6 @@ func (p *Plugin) OnCacheInvalidate(ctx context.Context, ev *collage.CacheInvalid
 // the router matched them, decoded.
 func absolute(origin, path string) string {
 	return origin + (&url.URL{Path: path}).EscapedPath()
-}
-
-// canResolve reports whether collage can name an origin without the plugin's
-// own BaseURL: from Config.BaseURL, or per host from a plugin implementing
-// collage.OriginResolver.
-func canResolve(host collage.Host) bool {
-	if host.BaseURL() != "" {
-		return true
-	}
-	origins, ok := host.(collage.Origins)
-	return ok && origins.Dynamic()
 }
 
 // flush sends what is pending, in the background. The timer calls it; once
