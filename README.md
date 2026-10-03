@@ -95,7 +95,7 @@ against a staging zone.
 
 | Option | JSON | Default | |
 | --- | --- | --- | --- |
-| `BaseURL` | `baseURL` | required | The public origin the CDN serves the site at |
+| `BaseURL` | `baseURL` | `Config.BaseURL` | The public origin the CDN serves the site at; without it, `Config.BaseURL`, or each host's origin from an origin resolver |
 | `Cloudflare` | `cloudflare` | | `zoneID`, `apiToken` (both required), `batchSize` (30), `endpoint` (`https://api.cloudflare.com`) |
 | `Webhook` | `webhook` | | `url` (required), `token`, `batchSize` (all) |
 | `Window` | `window` | `"2s"` | How long invalidations are collected before a purge |
@@ -105,7 +105,7 @@ against a staging zone.
 | `Force` | `force` | `false` | Purge from a development server too |
 | `Client` | — | | The `*http.Client` requests are sent with |
 
-At least one of `Cloudflare` and `Webhook` is required. A missing `BaseURL`, a
+At least one of `Cloudflare` and `Webhook` is required. No origin at all (no `BaseURL`, no `Config.BaseURL`, no origin resolver), a
 provider without what it needs, or an endpoint that is not an absolute URL stops
 the application from starting. Durations are written as Go writes them, `"2s"` or
 `"500ms"`. `endpoint` exists so a test can point the plugin at a server of its own.
@@ -132,9 +132,13 @@ environment, or fill `PluginConfig` from wherever your secrets live.
   caches `/search?q=a` and `/search?q=b` as separate objects is asked to purge
   `/search` only. Cloudflare's purge by URL matches the exact URL, query included,
   so those variants stay until they expire.
-- **One origin.** Every path is purged under the one `BaseURL`. A site served at
-  several hostnames — `example.com` and `www.example.com` both cached — purges only
-  the one named; point the other at a redirect, or add a webhook that fans out.
+- **Several hosts.** Without a `BaseURL` of its own, the plugin purges each
+  invalidated entry under its host's origin, as a `collage.OriginResolver` plugin
+  (such as `elagoht/tenant`) names it, falling back to `Config.BaseURL`. Two hosts
+  of one origin purge the URL once. With `BaseURL` set, every path is purged under
+  that one origin.
+- **One zone.** A Cloudflare zone purges only its own hostnames, so tenants on
+  custom domains in other zones need a webhook.
 - **Best effort.** Pending purges live in memory. A process killed without a
   graceful shutdown loses what was waiting for its window, and a purge that fails
   every retry is logged, not queued for later.

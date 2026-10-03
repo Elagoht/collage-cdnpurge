@@ -12,7 +12,7 @@
 //	})
 //
 // When collage drops cached pages it names their paths; the plugin makes them
-// absolute with BaseURL and asks the CDN to drop its copies too, so a reader
+// absolute with BaseURL (or Config.BaseURL, or each host's origin) and asks the CDN to drop its copies too, so a reader
 // behind the CDN sees the new page when a reader of the origin does. Cloudflare is
 // purged by URL through its API, and anything else through a webhook that
 // receives the URLs as JSON.
@@ -52,7 +52,8 @@ const Name = "elagoht/cdnpurge"
 type Options struct {
 	// BaseURL is the public origin the CDN serves the site at,
 	// "https://example.com": collage names paths, and a CDN purges URLs.
-	// Required.
+	// Optional: without it the purge uses Config.BaseURL, or, on a site served
+	// on several hosts, each host's origin from a collage.OriginResolver plugin.
 	BaseURL string `json:"baseURL"`
 	// Cloudflare purges a Cloudflare zone. At least one of Cloudflare and
 	// Webhook is required; with both, both are purged.
@@ -126,8 +127,9 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// ErrNoBaseURL is returned by Init when BaseURL is not an absolute http(s) URL.
-var ErrNoBaseURL = errors.New("cdnpurge: BaseURL is required: an absolute URL such as https://example.com")
+// ErrNoBaseURL is returned by Init when BaseURL is not an absolute http(s) URL, or
+// is empty and neither Config.BaseURL nor an origin resolver stands in for it.
+var ErrNoBaseURL = errors.New("cdnpurge: no origin to purge under: set BaseURL (an absolute URL such as https://example.com), Config.BaseURL, or an origin resolver")
 
 // ErrNoProvider is returned by Init when neither Cloudflare nor Webhook is set.
 var ErrNoProvider = errors.New("cdnpurge: nothing to purge: set Cloudflare or Webhook")
@@ -136,6 +138,7 @@ var ErrNoProvider = errors.New("cdnpurge: nothing to purge: set Cloudflare or We
 type Plugin struct {
 	opts    Options
 	base    string
+	origins collage.Origins
 	logger  *slog.Logger
 	targets []target
 	enabled bool
@@ -165,7 +168,7 @@ type target struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.1.2" }
+func (p *Plugin) Version() string { return "0.2.0" }
 
 var _ collage.CacheInvalidateHook = (*Plugin)(nil)
 
@@ -177,11 +180,20 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	}
 	p.logger = host.Logger()
 	o := &p.opts
-	base, err := url.Parse(o.BaseURL)
-	if o.BaseURL == "" || err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+	switch {
+	case o.BaseURL != "":
+		base, err := url.Parse(o.BaseURL)
+		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+			return ErrNoBaseURL
+		}
+		p.base = strings.TrimSuffix(o.BaseURL, "/")
+	case host.BaseURL() != "":
+		p.base = strings.TrimSuffix(host.BaseURL(), "/")
+	case canResolve(host):
+		p.origins, _ = host.(collage.Origins)
+	default:
 		return ErrNoBaseURL
 	}
-	p.base = strings.TrimSuffix(o.BaseURL, "/")
 	if o.Cloudflare == nil && o.Webhook == nil {
 		return ErrNoProvider
 	}
@@ -320,8 +332,8 @@ func checkURL(raw string) error {
 // OnCacheInvalidate queues the dropped paths and returns. The invalidating
 // goroutine is often a request's — an action that saved a post — and a CDN's API
 // is not something it should wait on.
-func (p *Plugin) OnCacheInvalidate(_ context.Context, ev *collage.CacheInvalidateEvent) error {
-	if !p.enabled || len(ev.Paths) == 0 {
+func (p *Plugin) OnCacheInvalidate(ctx context.Context, ev *collage.CacheInvalidateEvent) error {
+	if !p.enabled || len(ev.Entries) == 0 {
 		return nil
 	}
 	p.mu.Lock()
@@ -329,8 +341,15 @@ func (p *Plugin) OnCacheInvalidate(_ context.Context, ev *collage.CacheInvalidat
 	if p.closed {
 		return nil
 	}
-	for _, path := range ev.Paths {
-		p.pending[p.absolute(path)] = struct{}{}
+	for _, entry := range ev.Entries {
+		origin := p.base
+		if origin == "" && p.origins != nil {
+			origin = p.origins.OriginFor(ctx, entry.Host)
+		}
+		if origin == "" {
+			continue
+		}
+		p.pending[absolute(origin, entry.Path)] = struct{}{}
 	}
 	if p.timer == nil {
 		p.timer = time.AfterFunc(time.Duration(p.opts.Window), p.flush)
@@ -338,10 +357,21 @@ func (p *Plugin) OnCacheInvalidate(_ context.Context, ev *collage.CacheInvalidat
 	return nil
 }
 
-// absolute is path under BaseURL, escaped as a URL path: collage names paths as
+// absolute is path under origin, escaped as a URL path: collage names paths as
 // the router matched them, decoded.
-func (p *Plugin) absolute(path string) string {
-	return p.base + (&url.URL{Path: path}).EscapedPath()
+func absolute(origin, path string) string {
+	return origin + (&url.URL{Path: path}).EscapedPath()
+}
+
+// canResolve reports whether collage can name an origin without the plugin's
+// own BaseURL: from Config.BaseURL, or per host from a plugin implementing
+// collage.OriginResolver.
+func canResolve(host collage.Host) bool {
+	if host.BaseURL() != "" {
+		return true
+	}
+	origins, ok := host.(collage.Origins)
+	return ok && origins.Dynamic()
 }
 
 // flush sends what is pending, in the background. The timer calls it; once

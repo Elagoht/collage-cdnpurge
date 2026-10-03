@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -443,4 +444,96 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// origins resolves two hosts, as elagoht/tenant would.
+type origins struct{}
+
+func (origins) Name() string                             { return "test/origins" }
+func (origins) Version() string                          { return "0" }
+func (origins) Init(context.Context, collage.Host) error { return nil }
+func (origins) Shutdown(context.Context) error           { return nil }
+func (origins) Origin(_ context.Context, host string) (string, bool) {
+	switch host {
+	case "a.test":
+		return "https://a.example", true
+	case "b.test":
+		return "https://b.example", true
+	}
+	return "", false
+}
+
+// siteAt is newSite with Config.BaseURL set to baseURL.
+func siteAt(t *testing.T, baseURL string, plugins ...collage.Plugin) *site {
+	t.Helper()
+	app, err := collage.New(&collage.Config{
+		BaseURL:  baseURL,
+		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>{{.}}</p>`)}}, Root: "t"},
+		Cache:    collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Plugins:  plugins,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := collage.NewFragment("post", "p.html").WithDataHandler(collage.DataHandler(
+		func(_ context.Context, rc *collage.RenderContext) (string, []string, error) {
+			return rc.Param("slug"), []string{"posts"}, nil
+		})).Static().Build()
+	if err := app.RegisterPage(collage.NewPage("post").WithContent(post).WithPath("en", "/posts/{slug}").Build()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+	return &site{app: app, h: app.Handler()}
+}
+
+// Without a BaseURL of its own, cdnpurge falls back to Config.BaseURL.
+func TestFallsBackToConfigBaseURL(t *testing.T) {
+	c := newCDN(t)
+	s := siteAt(t, "https://example.com", cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
+	s.get(t, "/posts/a")
+	if err := s.app.InvalidateTags(context.Background(), "posts"); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.wait(t).body["files"]; !slices.Equal(got, []string{"https://example.com/posts/a"}) {
+		t.Errorf("files = %q, want Config.BaseURL's", got)
+	}
+}
+
+// With a resolver and no BaseURL, each entry is purged under its host's origin,
+// and two hosts of one origin purge the URL once.
+func TestPurge_PerOrigin(t *testing.T) {
+	c := newCDN(t)
+	s := siteAt(t, "", origins{}, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
+	for _, url := range []string{"http://a.test/posts/a", "http://b.test/posts/a", "http://a.test:80/posts/a"} {
+		s.get(t, url)
+	}
+	if err := s.app.InvalidateTags(context.Background(), "posts"); err != nil {
+		t.Fatal(err)
+	}
+	got := slices.Clone(c.wait(t).body["files"])
+	slices.Sort(got)
+	if want := []string{"https://a.example/posts/a", "https://b.example/posts/a"}; !slices.Equal(got, want) {
+		t.Errorf("files = %q, want %q", got, want)
+	}
+	c.quiet(t, 100*time.Millisecond)
+}
+
+// With no BaseURL of its own, none in Config and no resolver, collage cannot
+// name an origin: starting the application fails with ErrNoBaseURL.
+func TestNoOriginAnywhereFailsStart(t *testing.T) {
+	app, err := collage.New(&collage.Config{
+		Server:   collage.ServerConfig{Host: "localhost", Port: 0},
+		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>x</p>`)}}, Root: "t"},
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Plugins:  []collage.Plugin{cdnpurge.New(fast(cdnpurge.Options{Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t"}}))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
+	if err := app.Start(); !errors.Is(err, cdnpurge.ErrNoBaseURL) {
+		t.Errorf("Start() = %v, want ErrNoBaseURL", err)
+	}
 }

@@ -26,7 +26,7 @@
       },
       "baseURL": {
         "type": "string",
-        "description": "BaseURL is the public origin the CDN serves the site at, \"https://example.com\": collage names paths, and a CDN purges URLs. Required."
+        "description": "BaseURL is the public origin the CDN serves the site at, \"https://example.com\": collage names paths, and a CDN purges URLs. Optional: without it the purge uses Config.BaseURL, or, on a site served on several hosts, each host's origin from a collage.OriginResolver plugin."
       },
       "cloudflare": {
         "type": "object",
