@@ -110,9 +110,9 @@ func newSite(t *testing.T, dev bool, logs io.Writer, plugins ...collage.Plugin) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	post := collage.NewFragment("post", "p.html").WithDataHandler(func(_ context.Context, rc *collage.RenderContext) (any, []string, error) {
+	post := collage.NewFragment("post", "p.html").WithData(collage.DataHandler(func(_ context.Context, rc *collage.RenderContext) (string, []string, error) {
 		return rc.Param("slug"), []string{"post:" + rc.Param("slug"), "posts"}, nil
-	}).Static().Build()
+	})).Static().Build()
 	if err := app.RegisterPage(collage.NewPage("post").WithContent(post).WithPath("en", "/posts/{slug}").Build()); err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +478,7 @@ func siteAt(t *testing.T, baseURL string, plugins ...collage.Plugin) *site {
 	if err != nil {
 		t.Fatal(err)
 	}
-	post := collage.NewFragment("post", "p.html").WithDataHandler(collage.DataHandler(
+	post := collage.NewFragment("post", "p.html").WithData(collage.DataHandler(
 		func(_ context.Context, rc *collage.RenderContext) (string, []string, error) {
 			return rc.Param("slug"), []string{"posts"}, nil
 		})).Static().Build()
