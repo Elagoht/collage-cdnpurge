@@ -168,16 +168,18 @@ type target struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.2.1" }
+func (p *Plugin) Version() string { return "0.2.2" }
 
 var _ collage.CacheInvalidateHook = (*Plugin)(nil)
 
 // Init reads and checks the configuration. A plugin that cannot purge refuses to
 // start rather than letting the CDN serve stale pages without a word.
 func (p *Plugin) Init(_ context.Context, host collage.Host) error {
-	if err := host.Config(&p.opts); err != nil {
+	cfg, err := collage.PluginConfig(host, p.opts)
+	if err != nil {
 		return err
 	}
+	p.opts = cfg
 	p.logger = host.Logger()
 	o := &p.opts
 	// The plugin's own BaseURL wins, for every entry. Without one, each entry is
