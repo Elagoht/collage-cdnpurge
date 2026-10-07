@@ -9,3 +9,5 @@ module github.com/Elagoht/collage-cdnpurge
 go 1.26
 
 require github.com/Elagoht/collage v0.50.0
+
+retract v0.2.2 // tagged by mistake on the previous release's code; use v0.2.3 or later
