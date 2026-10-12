@@ -3,38 +3,27 @@
   "name": "elagoht/cdnpurge",
   "description": "A collage plugin that purges a CDN's copies of the pages collage invalidates.",
   "repository": "https://github.com/Elagoht/collage-cdnpurge",
+  "setup": "Nothing is purged until a CDN is named: set `\"cloudflare\": {\"zoneID\": …, \"apiTokenEnv\": \"CF_API_TOKEN\"}` or `\"webhook\": {\"url\": …}` in this plugin's section of `plugins-config.json`. URLs are made absolute under `Config.BaseURL` (`BASE_URL`) or an origin resolver's origins; without either the application does not start.",
   "config": {
     "type": "object",
     "description": "A collage plugin that purges a CDN's copies of the pages collage invalidates.",
     "properties": {
       "backoff": {
-        "description": "Backoff is the wait before the first retry, doubled before each one after it. A 429's Retry-After, when longer, is honoured instead. Default \"1s\".",
-        "anyOf": [
-          {
-            "type": "string",
-            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
-            "examples": [
-              "30s",
-              "5m"
-            ]
-          },
-          {
-            "type": "integer",
-            "description": "nanoseconds"
-          }
-        ]
-      },
-      "baseURL": {
         "type": "string",
-        "description": "BaseURL is the public origin the CDN serves the site at, \"https://example.com\": collage names paths, and a CDN purges URLs. Optional: without it the purge uses Config.BaseURL, or, on a site served on several hosts, each host's origin from a collage.OriginResolver plugin."
+        "description": "Backoff is the wait before the first retry, doubled before each one after it. A 429's Retry-After, when longer, is honoured instead. Default \"1s\".",
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
+        ]
       },
       "cloudflare": {
         "type": "object",
         "description": "Cloudflare purges a Cloudflare zone. At least one of Cloudflare and Webhook is required; with both, both are purged.",
         "properties": {
-          "apiToken": {
+          "apiTokenEnv": {
             "type": "string",
-            "description": "APIToken is an API token with the Zone → Cache Purge permission for the zone. Required. Keep it out of a configuration file under version control."
+            "description": "APITokenEnv names the environment variable holding an API token with the Zone → Cache Purge permission for the zone. It or APIToken is required; when set, it wins over APIToken."
           },
           "batchSize": {
             "type": "integer",
@@ -51,29 +40,21 @@
         },
         "additionalProperties": false
       },
-      "force": {
+      "inDevelopment": {
         "type": "boolean",
-        "description": "Force purges from a development server too, which otherwise purges nothing."
+        "description": "InDevelopment purges from a development server too, which otherwise purges nothing."
       },
       "retries": {
         "type": "integer",
-        "description": "Retries is how many times a request the CDN answered 429 or 5xx, or that did not reach it, is tried again. Default 4; negative tries once."
+        "description": "Retries is how many times a request the CDN answered 429 or 5xx, or that did not reach it, is tried again. Default 4; negative is an error."
       },
       "timeout": {
+        "type": "string",
         "description": "Timeout bounds one request to the CDN. Default \"10s\".",
-        "anyOf": [
-          {
-            "type": "string",
-            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
-            "examples": [
-              "30s",
-              "5m"
-            ]
-          },
-          {
-            "type": "integer",
-            "description": "nanoseconds"
-          }
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
         ]
       },
       "webhook": {
@@ -84,9 +65,9 @@
             "type": "integer",
             "description": "BatchSize is how many URLs one request carries. Default: all of them."
           },
-          "token": {
+          "tokenEnv": {
             "type": "string",
-            "description": "Token, when set, is sent as \"Authorization: Bearer \u003ctoken\u003e\"."
+            "description": "TokenEnv names the environment variable holding a token sent as \"Authorization: Bearer \u003ctoken\u003e\". Optional; when set, it wins over Token, and an empty variable is an error."
           },
           "url": {
             "type": "string",
@@ -96,20 +77,12 @@
         "additionalProperties": false
       },
       "window": {
+        "type": "string",
         "description": "Window is how long invalidations are collected before they are sent, so a burst of them is one request. Default \"2s\".",
-        "anyOf": [
-          {
-            "type": "string",
-            "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
-            "examples": [
-              "30s",
-              "5m"
-            ]
-          },
-          {
-            "type": "integer",
-            "description": "nanoseconds"
-          }
+        "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
+        "examples": [
+          "30s",
+          "5m"
         ]
       }
     },

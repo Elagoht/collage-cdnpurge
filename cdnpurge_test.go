@@ -1,7 +1,6 @@
 package cdnpurge_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,11 +14,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	cdnpurge "github.com/Elagoht/collage-cdnpurge"
 	"github.com/Elagoht/collage/pkg/collage"
+	"github.com/Elagoht/collage/pkg/collagetest"
 )
 
 // cdn is a fake purge API: it records every request and answers with the next
@@ -87,45 +86,39 @@ func (c *cdn) quiet(t *testing.T, d time.Duration) {
 	}
 }
 
-type site struct {
-	app *collage.App
-	h   http.Handler
-}
-
-// newSite builds an application with a cached page at /posts/{slug}, tagged
-// "posts" and "post:<slug>".
-func newSite(t *testing.T, dev bool, logs io.Writer, plugins ...collage.Plugin) *site {
-	t.Helper()
-	if logs == nil {
-		logs = io.Discard
-	}
-	app, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>{{.}}</p>`)}}, Root: "t"},
-		Cache:    collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		DevMode:  dev,
-		Logger:   slog.New(slog.NewTextHandler(logs, nil)),
-		Plugins:  plugins,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+// postPage is a cached page at /posts/{slug}, tagged "posts" and "post:<slug>".
+func postPage() collage.Registrable {
 	post := collage.NewFragment("post", "p.html").WithData(collage.LoadTagged(func(_ context.Context, rc *collage.RenderContext) (string, []string, error) {
 		return rc.Param("slug"), []string{"post:" + rc.Param("slug"), "posts"}, nil
 	})).Static().Build()
-	if err := app.RegisterPage(collage.NewPage("post").WithContent(post).WithPath("en", "/posts/{slug}").Build()); err != nil {
-		t.Fatal(err)
-	}
-	s := &site{app: app, h: app.Handler()}
-	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
-	return s
+	return collage.NewPage("post").WithContent(post).WithPath("en", "/posts/{slug}").Build()
 }
 
-func (s *site) get(t *testing.T, path string) int {
+// siteOptions is what every site here has: the post page, a memory cache,
+// baseURL as Config.BaseURL and dev as development mode.
+func siteOptions(baseURL string, dev bool, plugins []collage.Plugin) []collagetest.SiteOption {
+	return []collagetest.SiteOption{
+		collagetest.WithPlugins(plugins...),
+		collagetest.WithTemplates(map[string]string{"p.html": `<p>{{.}}</p>`}),
+		collagetest.WithRegister(postPage()),
+		collagetest.WithConfig(func(c *collage.Config) {
+			c.BaseURL = baseURL
+			c.DevMode = dev
+			c.Cache = collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour}
+		}),
+	}
+}
+
+// newSite starts an application at https://example.com with the post page.
+func newSite(t *testing.T, dev bool, plugins ...collage.Plugin) *collagetest.Site {
 	t.Helper()
-	rec := httptest.NewRecorder()
-	s.h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-	return rec.Code
+	return collagetest.NewSite(t, siteOptions("https://example.com", dev, plugins)...)
+}
+
+// siteAt is newSite with Config.BaseURL set to baseURL.
+func siteAt(t *testing.T, baseURL string, plugins ...collage.Plugin) *collagetest.Site {
+	t.Helper()
+	return collagetest.NewSite(t, siteOptions(baseURL, false, plugins)...)
 }
 
 func cloudflare(c *cdn) *cdnpurge.Cloudflare {
@@ -134,19 +127,19 @@ func cloudflare(c *cdn) *cdnpurge.Cloudflare {
 
 func fast(o cdnpurge.Options) cdnpurge.Options {
 	if o.Window == 0 {
-		o.Window = cdnpurge.Duration(20 * time.Millisecond)
+		o.Window = collage.Duration(20 * time.Millisecond)
 	}
-	o.Backoff = cdnpurge.Duration(time.Millisecond)
+	o.Backoff = collage.Duration(time.Millisecond)
 	return o
 }
 
 func TestCloudflarePurgesTheDroppedURLs(t *testing.T) {
 	c := newCDN(t)
-	s := newSite(t, false, nil, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com/", Cloudflare: cloudflare(c)})))
-	s.get(t, "/posts/a")
-	s.get(t, "/posts/b")
-	s.get(t, "/posts/c%20d")
-	if err := s.app.InvalidateTags(context.Background(), "posts"); err != nil {
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
+	s.Get("/posts/a")
+	s.Get("/posts/b")
+	s.Get("/posts/c%20d")
+	if err := s.App.InvalidateTags(context.Background(), "posts"); err != nil {
 		t.Fatal(err)
 	}
 	cl := c.wait(t)
@@ -165,16 +158,16 @@ func TestCloudflarePurgesTheDroppedURLs(t *testing.T) {
 // A burst of invalidations inside the window is one request.
 func TestInvalidationsInOneWindowAreOneRequest(t *testing.T) {
 	c := newCDN(t)
-	s := newSite(t, false, nil, cdnpurge.New(fast(cdnpurge.Options{
-		BaseURL: "https://example.com", Cloudflare: cloudflare(c), Window: cdnpurge.Duration(200 * time.Millisecond),
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{
+		Cloudflare: cloudflare(c), Window: collage.Duration(200 * time.Millisecond),
 	})))
-	s.get(t, "/posts/a")
-	s.get(t, "/posts/b")
+	s.Get("/posts/a")
+	s.Get("/posts/b")
 	ctx := context.Background()
-	_ = s.app.InvalidateTags(ctx, "post:a")
-	s.get(t, "/posts/a") // cached again, and dropped again below: named once
-	_ = s.app.InvalidateTags(ctx, "post:b")
-	_ = s.app.InvalidateTags(ctx, "post:a")
+	_ = s.App.InvalidateTags(ctx, "post:a")
+	s.Get("/posts/a") // cached again, and dropped again below: named once
+	_ = s.App.InvalidateTags(ctx, "post:b")
+	_ = s.App.InvalidateTags(ctx, "post:a")
 	cl := c.wait(t)
 	if want := []string{"https://example.com/posts/a", "https://example.com/posts/b"}; !slices.Equal(cl.body["files"], want) {
 		t.Errorf("files = %q, want %q", cl.body["files"], want)
@@ -185,11 +178,11 @@ func TestInvalidationsInOneWindowAreOneRequest(t *testing.T) {
 // Cloudflare takes 30 URLs per request.
 func TestCloudflareBatchesOf30(t *testing.T) {
 	c := newCDN(t)
-	s := newSite(t, false, nil, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c)})))
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
 	for i := range 65 {
-		s.get(t, fmt.Sprintf("/posts/%02d", i))
+		s.Get(fmt.Sprintf("/posts/%02d", i))
 	}
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	var sizes []int
 	seen := map[string]bool{}
 	for range 3 {
@@ -207,9 +200,9 @@ func TestCloudflareBatchesOf30(t *testing.T) {
 // 429 and 5xx are tried again; the batch arrives in the end.
 func TestRetriesOn429And5xx(t *testing.T) {
 	c := newCDN(t, http.StatusTooManyRequests, http.StatusBadGateway)
-	s := newSite(t, false, nil, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c)})))
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	for range 3 {
 		c.wait(t)
 	}
@@ -219,30 +212,28 @@ func TestRetriesOn429And5xx(t *testing.T) {
 // A 400 will be refused however often it is sent: tried once, and logged.
 func TestNoRetryOn4xx(t *testing.T) {
 	c := newCDN(t, http.StatusBadRequest)
-	var logs syncBuffer
-	s := newSite(t, false, &logs, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c)})))
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	c.wait(t)
 	c.quiet(t, 100*time.Millisecond)
-	if !strings.Contains(logs.String(), "purge failed") {
-		t.Errorf("the failure was not logged:\n%s", logs.String())
+	if !s.Logs.Has(slog.LevelError, "purge failed") {
+		t.Errorf("the failure was not logged:\n%s", s.Logs.String())
 	}
 }
 
 // Retries stop at Retries, and the failure is logged.
 func TestRetriesAreBounded(t *testing.T) {
 	c := newCDN(t, 500, 500, 500, 500, 500, 500)
-	var logs syncBuffer
-	s := newSite(t, false, &logs, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c), Retries: 2})))
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c), Retries: 2})))
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	for range 3 {
 		c.wait(t)
 	}
 	c.quiet(t, 100*time.Millisecond)
-	if !strings.Contains(logs.String(), "purge failed") {
-		t.Errorf("the failure was not logged:\n%s", logs.String())
+	if !s.Logs.Has(slog.LevelError, "purge failed") {
+		t.Errorf("the failure was not logged:\n%s", s.Logs.String())
 	}
 }
 
@@ -252,14 +243,13 @@ func TestCloudflareSuccessFalseIsLogged(t *testing.T) {
 		_, _ = io.WriteString(w, `{"success": false, "errors": [{"code": 1012, "message": "Request must contain one of \"purge_everything\" or \"files\""}]}`)
 	}))
 	defer srv.Close()
-	var logs syncBuffer
-	p := cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t", Endpoint: srv.URL}}))
-	s := newSite(t, false, &logs, p)
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
-	_ = s.app.Shutdown(context.Background())
-	if !strings.Contains(logs.String(), "1012") {
-		t.Errorf("the refusal was not logged:\n%s", logs.String())
+	p := cdnpurge.New(fast(cdnpurge.Options{Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t", Endpoint: srv.URL}}))
+	s := newSite(t, false, p)
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
+	_ = s.App.Shutdown(context.Background())
+	if !s.Logs.Has(slog.LevelError, "1012") {
+		t.Errorf("the refusal was not logged:\n%s", s.Logs.String())
 	}
 }
 
@@ -267,14 +257,14 @@ func TestCloudflareSuccessFalseIsLogged(t *testing.T) {
 func TestInvalidationDoesNotWaitForTheCDN(t *testing.T) {
 	c := newCDN(t)
 	c.block = make(chan struct{})
-	s := newSite(t, false, nil, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c), Window: cdnpurge.Duration(time.Millisecond)})))
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c), Window: collage.Duration(time.Millisecond)})))
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	time.Sleep(50 * time.Millisecond) // the purge is now in flight, blocked
-	s.get(t, "/posts/b")
+	s.Get("/posts/b")
 	done := make(chan struct{})
 	go func() {
-		_ = s.app.InvalidateTags(context.Background(), "posts")
+		_ = s.App.InvalidateTags(context.Background(), "posts")
 		close(done)
 	}()
 	select {
@@ -290,11 +280,11 @@ func TestInvalidationDoesNotWaitForTheCDN(t *testing.T) {
 // What is pending at shutdown is sent before Shutdown returns.
 func TestShutdownFlushesPending(t *testing.T) {
 	c := newCDN(t)
-	s := newSite(t, false, nil, cdnpurge.New(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c), Window: cdnpurge.Duration(time.Hour)}))
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	s := newSite(t, false, cdnpurge.New(cdnpurge.Options{Cloudflare: cloudflare(c), Window: collage.Duration(time.Hour)}))
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	c.quiet(t, 50*time.Millisecond)
-	if err := s.app.Shutdown(context.Background()); err != nil {
+	if err := s.App.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -310,14 +300,17 @@ func TestShutdownFlushesPending(t *testing.T) {
 // A retry still waiting when Shutdown's context ends gives up.
 func TestShutdownGivesUpWhenItsContextEnds(t *testing.T) {
 	c := newCDN(t, 500, 500, 500, 500, 500)
-	o := cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c), Window: cdnpurge.Duration(time.Hour), Backoff: cdnpurge.Duration(time.Hour)}
-	s := newSite(t, false, nil, cdnpurge.New(o))
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	o := cdnpurge.Options{Cloudflare: cloudflare(c), Window: collage.Duration(time.Hour), Backoff: collage.Duration(time.Hour)}
+	p := cdnpurge.New(o)
+	s := newSite(t, false, p)
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	err := s.app.Shutdown(ctx)
+	// The plugin's own Shutdown, not the application's: an application keeps
+	// its first Shutdown's error, which the site's cleanup would then report.
+	err := p.Shutdown(ctx)
 	if err == nil || !strings.Contains(err.Error(), "in flight") {
 		t.Errorf("Shutdown = %v", err)
 	}
@@ -328,13 +321,12 @@ func TestShutdownGivesUpWhenItsContextEnds(t *testing.T) {
 
 func TestWebhook(t *testing.T) {
 	c := newCDN(t)
-	s := newSite(t, false, nil, cdnpurge.New(fast(cdnpurge.Options{
-		BaseURL: "https://example.com",
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{
 		Webhook: &cdnpurge.Webhook{URL: c.URL + "/purge", Token: "tok"},
 	})))
-	s.get(t, "/posts/a")
-	s.get(t, "/posts/b")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	s.Get("/posts/a")
+	s.Get("/posts/b")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	cl := c.wait(t)
 	if cl.path != "/purge" || cl.auth != "Bearer tok" {
 		t.Errorf("request = %q %q", cl.path, cl.auth)
@@ -347,11 +339,11 @@ func TestWebhook(t *testing.T) {
 // Configured with both, both are purged.
 func TestBothProviders(t *testing.T) {
 	cf, wh := newCDN(t), newCDN(t)
-	s := newSite(t, false, nil, cdnpurge.New(fast(cdnpurge.Options{
-		BaseURL: "https://example.com", Cloudflare: cloudflare(cf), Webhook: &cdnpurge.Webhook{URL: wh.URL},
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{
+		Cloudflare: cloudflare(cf), Webhook: &cdnpurge.Webhook{URL: wh.URL},
 	})))
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	cf.wait(t)
 	if cl := wh.wait(t); cl.auth != "" {
 		t.Errorf("a webhook without a token sent Authorization %q", cl.auth)
@@ -361,90 +353,110 @@ func TestBothProviders(t *testing.T) {
 // An invalidation that dropped nothing purges nothing.
 func TestNothingDroppedNothingPurged(t *testing.T) {
 	c := newCDN(t)
-	s := newSite(t, false, nil, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c)})))
-	_ = s.app.InvalidateTags(context.Background(), "posts")
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
+	_ = s.App.InvalidateTags(context.Background(), "posts")
 	c.quiet(t, 100*time.Millisecond)
 }
 
 // A development server purges nothing, unless forced.
 func TestDevelopment(t *testing.T) {
 	c := newCDN(t)
-	s := newSite(t, true, nil, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c)})))
-	s.get(t, "/posts/a")
-	_ = s.app.InvalidateTags(context.Background(), "posts")
-	_ = s.app.Shutdown(context.Background())
+	s := newSite(t, true, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
+	_ = s.App.Shutdown(context.Background())
 	c.quiet(t, 100*time.Millisecond)
 
-	forced := newSite(t, true, nil, cdnpurge.New(fast(cdnpurge.Options{BaseURL: "https://example.com", Cloudflare: cloudflare(c), Force: true})))
-	forced.get(t, "/posts/a")
-	_ = forced.app.InvalidateTags(context.Background(), "posts")
+	forced := newSite(t, true, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c), InDevelopment: true})))
+	forced.Get("/posts/a")
+	_ = forced.App.InvalidateTags(context.Background(), "posts")
 	c.wait(t)
 }
 
-// Configuration read from JSON: durations as Go writes them.
+// Configuration read from JSON: durations as Go writes them, the token from the
+// environment variable apiTokenEnv names.
 func TestJSONConfiguration(t *testing.T) {
 	c := newCDN(t)
-	raw := fmt.Sprintf(`{"baseURL": "https://example.com", "window": "10ms", "backoff": "1ms",
-		"cloudflare": {"zoneID": "z9", "apiToken": "tk", "endpoint": %q}}`, c.URL)
-	app, err := collage.New(&collage.Config{
-		Server:       collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template:     collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>x</p>`)}}, Root: "t"},
-		Cache:        collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Plugins:      []collage.Plugin{cdnpurge.New(cdnpurge.Options{})},
-		PluginConfig: map[string]json.RawMessage{cdnpurge.Name: json.RawMessage(raw)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := app.RegisterPage(collage.NewPage("home").WithContent(collage.NewFragment("home", "p.html").Static().Build()).WithPath("en", "/").Build()); err != nil {
-		t.Fatal(err)
-	}
-	defer app.Shutdown(context.Background())
-	h := app.Handler()
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
-	_ = app.InvalidateTags(context.Background(), collage.PathTag("/"))
-	if cl := c.wait(t); cl.path != "/client/v4/zones/z9/purge_cache" || !slices.Equal(cl.body["files"], []string{"https://example.com/"}) {
+	t.Setenv("TEST_CF_TOKEN", "tk")
+	raw := fmt.Sprintf(`{"window": "10ms", "backoff": "1ms",
+		"cloudflare": {"zoneID": "z9", "apiTokenEnv": "TEST_CF_TOKEN", "endpoint": %q}}`, c.URL)
+	s := collagetest.NewSite(t, append(siteOptions("https://example.com", false, []collage.Plugin{cdnpurge.New(cdnpurge.Options{})}),
+		collagetest.WithPluginConfig(cdnpurge.Name, raw))...)
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
+	cl := c.wait(t)
+	if cl.path != "/client/v4/zones/z9/purge_cache" || !slices.Equal(cl.body["files"], []string{"https://example.com/posts/a"}) {
 		t.Errorf("request = %+v", cl)
+	}
+	if cl.auth != "Bearer tk" {
+		t.Errorf("Authorization = %q, want the token from TEST_CF_TOKEN", cl.auth)
+	}
+}
+
+// The webhook's token comes from the environment variable tokenEnv names, and
+// wins over a token set from Go.
+func TestWebhookTokenEnv(t *testing.T) {
+	c := newCDN(t)
+	t.Setenv("TEST_HOOK_TOKEN", "from-env")
+	s := newSite(t, false, cdnpurge.New(fast(cdnpurge.Options{
+		Webhook: &cdnpurge.Webhook{URL: c.URL, TokenEnv: "TEST_HOOK_TOKEN", Token: "from-go"},
+	})))
+	s.Get("/posts/a")
+	_ = s.App.InvalidateTags(context.Background(), "posts")
+	if cl := c.wait(t); cl.auth != "Bearer from-env" {
+		t.Errorf("Authorization = %q, want the token from TEST_HOOK_TOKEN", cl.auth)
 	}
 }
 
 // A plugin that cannot purge stops the application from starting.
 func TestMisconfigurationStopsStartup(t *testing.T) {
+	t.Setenv("TEST_EMPTY_TOKEN", "")
 	cases := map[string]cdnpurge.Options{
-		"no base URL":         {Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com"}},
-		"relative base URL":   {BaseURL: "example.com", Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com"}},
-		"no provider":         {BaseURL: "https://example.com"},
-		"no token":            {BaseURL: "https://example.com", Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z"}},
-		"no zone":             {BaseURL: "https://example.com", Cloudflare: &cdnpurge.Cloudflare{APIToken: "t"}},
-		"webhook without URL": {BaseURL: "https://example.com", Webhook: &cdnpurge.Webhook{}},
-		"bad endpoint":        {BaseURL: "https://example.com", Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t", Endpoint: "api.cloudflare.com"}},
+		"no provider":         {},
+		"no token":            {Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z"}},
+		"empty token env":     {Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APITokenEnv: "TEST_EMPTY_TOKEN", APIToken: "t"}},
+		"empty webhook env":   {Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com", TokenEnv: "TEST_EMPTY_TOKEN"}},
+		"no zone":             {Cloudflare: &cdnpurge.Cloudflare{APIToken: "t"}},
+		"webhook without URL": {Webhook: &cdnpurge.Webhook{}},
+		"bad endpoint":        {Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t", Endpoint: "api.cloudflare.com"}},
+		"negative retries":    {Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com"}, Retries: -1},
 	}
 	for name, o := range cases {
 		t.Run(name, func(t *testing.T) {
-			s := newSite(t, false, nil, cdnpurge.New(o))
-			if code := s.get(t, "/posts/a"); code != http.StatusServiceUnavailable {
-				t.Errorf("status = %d, want 503", code)
+			_, err := collagetest.TrySite(t, siteOptions("https://example.com", false, []collage.Plugin{cdnpurge.New(o)})...)
+			if err == nil || !strings.Contains(err.Error(), "cdnpurge:") {
+				t.Errorf("start = %v, want a cdnpurge error", err)
 			}
 		})
 	}
 }
 
-type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+// The keys v0.3.0 renamed or removed stop the application, by name.
+func TestRemovedKeysFail(t *testing.T) {
+	cases := map[string]string{
+		"baseURL":  `{"baseURL": "https://example.com", "webhook": {"url": "https://hooks.example.com"}}`,
+		"force":    `{"force": true, "webhook": {"url": "https://hooks.example.com"}}`,
+		"apiToken": `{"cloudflare": {"zoneID": "z", "apiToken": "t"}}`,
+		"token":    `{"webhook": {"url": "https://hooks.example.com", "token": "t"}}`,
+	}
+	for key, raw := range cases {
+		t.Run(key, func(t *testing.T) {
+			_, err := collagetest.TrySite(t, append(siteOptions("https://example.com", false, []collage.Plugin{cdnpurge.New(cdnpurge.Options{})}),
+				collagetest.WithPluginConfig(cdnpurge.Name, raw))...)
+			if err == nil || !strings.Contains(err.Error(), `"`+key+`"`) {
+				t.Errorf("start = %v, want an error naming %q", err, key)
+			}
+		})
+	}
 }
 
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
+// A duration written as a number is refused, not read as nanoseconds.
+func TestDurationAsNumberFails(t *testing.T) {
+	_, err := collagetest.TrySite(t, append(siteOptions("https://example.com", false, []collage.Plugin{cdnpurge.New(cdnpurge.Options{})}),
+		collagetest.WithPluginConfig(cdnpurge.Name, `{"window": 2, "webhook": {"url": "https://hooks.example.com"}}`))...)
+	if err == nil || !strings.Contains(err.Error(), `"window"`) {
+		t.Errorf("start = %v, want an error naming window", err)
+	}
 }
 
 // origins resolves two hosts, as elagoht/tenant would.
@@ -464,37 +476,12 @@ func (origins) Origin(_ context.Context, host string) (string, bool) {
 	return "", false
 }
 
-// siteAt is newSite with Config.BaseURL set to baseURL.
-func siteAt(t *testing.T, baseURL string, plugins ...collage.Plugin) *site {
-	t.Helper()
-	app, err := collage.New(&collage.Config{
-		BaseURL:  baseURL,
-		Server:   collage.ServerConfig{Host: "localhost", Port: 3000},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>{{.}}</p>`)}}, Root: "t"},
-		Cache:    collage.CacheConfig{Enabled: true, Type: "memory", DefaultTTL: time.Hour},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Plugins:  plugins,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	post := collage.NewFragment("post", "p.html").WithData(collage.LoadTagged(
-		func(_ context.Context, rc *collage.RenderContext) (string, []string, error) {
-			return rc.Param("slug"), []string{"posts"}, nil
-		})).Static().Build()
-	if err := app.RegisterPage(collage.NewPage("post").WithContent(post).WithPath("en", "/posts/{slug}").Build()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
-	return &site{app: app, h: app.Handler()}
-}
-
-// Without a BaseURL of its own, cdnpurge falls back to Config.BaseURL.
+// cdnpurge purges under Config.BaseURL.
 func TestFallsBackToConfigBaseURL(t *testing.T) {
 	c := newCDN(t)
 	s := siteAt(t, "https://example.com", cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
-	s.get(t, "/posts/a")
-	if err := s.app.InvalidateTags(context.Background(), "posts"); err != nil {
+	s.Get("/posts/a")
+	if err := s.App.InvalidateTags(context.Background(), "posts"); err != nil {
 		t.Fatal(err)
 	}
 	if got := c.wait(t).body["files"]; !slices.Equal(got, []string{"https://example.com/posts/a"}) {
@@ -502,15 +489,15 @@ func TestFallsBackToConfigBaseURL(t *testing.T) {
 	}
 }
 
-// With a resolver and no BaseURL, each entry is purged under its host's origin,
+// With a resolver and no Config.BaseURL, each entry is purged under its host's origin,
 // and two hosts of one origin purge the URL once.
 func TestPurge_PerOrigin(t *testing.T) {
 	c := newCDN(t)
 	s := siteAt(t, "", origins{}, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
 	for _, url := range []string{"http://a.test/posts/a", "http://b.test/posts/a", "http://a.test:80/posts/a"} {
-		s.get(t, url)
+		s.Get(url)
 	}
-	if err := s.app.InvalidateTags(context.Background(), "posts"); err != nil {
+	if err := s.App.InvalidateTags(context.Background(), "posts"); err != nil {
 		t.Fatal(err)
 	}
 	got := slices.Clone(c.wait(t).body["files"])
@@ -521,21 +508,12 @@ func TestPurge_PerOrigin(t *testing.T) {
 	c.quiet(t, 100*time.Millisecond)
 }
 
-// With no BaseURL of its own, none in Config and no resolver, collage cannot
+// With no Config.BaseURL and no resolver, collage cannot
 // name an origin: starting the application fails with ErrNoBaseURL.
 func TestNoOriginAnywhereFailsStart(t *testing.T) {
-	app, err := collage.New(&collage.Config{
-		Server:   collage.ServerConfig{Host: "localhost", Port: 0},
-		Template: collage.TemplateConfig{FS: fstest.MapFS{"t/p.html": {Data: []byte(`<p>x</p>`)}}, Root: "t"},
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Plugins:  []collage.Plugin{cdnpurge.New(fast(cdnpurge.Options{Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t"}}))},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = app.Shutdown(context.Background()) })
-	if err := app.Start(); !errors.Is(err, cdnpurge.ErrNoBaseURL) {
-		t.Errorf("Start() = %v, want ErrNoBaseURL", err)
+	_, err := collagetest.TrySite(t, siteOptions("", false, []collage.Plugin{cdnpurge.New(fast(cdnpurge.Options{Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t"}}))})...)
+	if !errors.Is(err, cdnpurge.ErrNoBaseURL) {
+		t.Errorf("start = %v, want ErrNoBaseURL", err)
 	}
 }
 
@@ -545,9 +523,9 @@ func TestPurge_PerOriginWithConfigBaseURL(t *testing.T) {
 	c := newCDN(t)
 	s := siteAt(t, "https://main.example", origins{}, cdnpurge.New(fast(cdnpurge.Options{Cloudflare: cloudflare(c)})))
 	for _, url := range []string{"http://a.test/posts/a", "http://b.test/posts/a", "http://other.test/posts/a"} {
-		s.get(t, url)
+		s.Get(url)
 	}
-	if err := s.app.InvalidateTags(context.Background(), "posts"); err != nil {
+	if err := s.App.InvalidateTags(context.Background(), "posts"); err != nil {
 		t.Fatal(err)
 	}
 	got := slices.Clone(c.wait(t).body["files"])

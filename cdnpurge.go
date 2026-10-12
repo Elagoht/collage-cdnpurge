@@ -2,17 +2,18 @@
 // collage invalidates.
 //
 //	app, err := collage.New(&collage.Config{
+//		BaseURL: "https://example.com",
 //		Plugins: []collage.Plugin{cdnpurge.New(cdnpurge.Options{
-//			BaseURL: "https://example.com",
 //			Cloudflare: &cdnpurge.Cloudflare{
-//				ZoneID:   os.Getenv("CF_ZONE_ID"),
-//				APIToken: os.Getenv("CF_API_TOKEN"),
+//				ZoneID:      os.Getenv("CF_ZONE_ID"),
+//				APITokenEnv: "CF_API_TOKEN",
 //			},
 //		})},
 //	})
 //
 // When collage drops cached pages it names their paths; the plugin makes them
-// absolute with BaseURL (or Config.BaseURL, or each host's origin) and asks the CDN to drop its copies too, so a reader
+// absolute under the site's origin (Config.BaseURL, or each host's origin from an
+// origin resolver) and asks the CDN to drop its copies too, so a reader
 // behind the CDN sees the new page when a reader of the origin does. Cloudflare is
 // purged by URL through its API, and anything else through a webhook that
 // receives the URLs as JSON.
@@ -22,7 +23,7 @@
 // burst of invalidations is one request, and sent in the background, retried with
 // backoff when the CDN answers 429 or 5xx. What is still pending when the
 // application shuts down is sent before Shutdown returns. A development server
-// purges nothing unless Force says so: its invalidations are an editor's, and the
+// purges nothing unless InDevelopment says so: its invalidations are an editor's, and the
 // CDN is production's.
 package cdnpurge
 
@@ -36,6 +37,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -50,11 +52,6 @@ const Name = "elagoht/cdnpurge"
 
 // Options configures the plugin.
 type Options struct {
-	// BaseURL is the public origin the CDN serves the site at,
-	// "https://example.com": collage names paths, and a CDN purges URLs.
-	// Optional: without it the purge uses Config.BaseURL, or, on a site served
-	// on several hosts, each host's origin from a collage.OriginResolver plugin.
-	BaseURL string `json:"baseURL"`
 	// Cloudflare purges a Cloudflare zone. At least one of Cloudflare and
 	// Webhook is required; with both, both are purged.
 	Cloudflare *Cloudflare `json:"cloudflare"`
@@ -63,30 +60,33 @@ type Options struct {
 	Webhook *Webhook `json:"webhook"`
 	// Window is how long invalidations are collected before they are sent, so a
 	// burst of them is one request. Default "2s".
-	Window Duration `json:"window"`
+	Window collage.Duration `json:"window"`
 	// Retries is how many times a request the CDN answered 429 or 5xx, or that
-	// did not reach it, is tried again. Default 4; negative tries once.
+	// did not reach it, is tried again. Default 4; negative is an error.
 	Retries int `json:"retries"`
 	// Backoff is the wait before the first retry, doubled before each one after
 	// it. A 429's Retry-After, when longer, is honoured instead. Default "1s".
-	Backoff Duration `json:"backoff"`
+	Backoff collage.Duration `json:"backoff"`
 	// Timeout bounds one request to the CDN. Default "10s".
-	Timeout Duration `json:"timeout"`
-	// Force purges from a development server too, which otherwise purges
-	// nothing.
-	Force bool `json:"force"`
-	// Client sends the requests. Default: an http.Client with no timeout of its
-	// own, since each request is bounded by Timeout.
-	Client *http.Client `json:"-"`
+	Timeout collage.Duration `json:"timeout"`
+	// InDevelopment purges from a development server too, which otherwise
+	// purges nothing.
+	InDevelopment bool `json:"inDevelopment"`
+	// HTTPClient sends the requests. Default: an http.Client with no timeout of
+	// its own, since each request is bounded by Timeout.
+	HTTPClient *http.Client `json:"-"`
 }
 
 // Cloudflare purges files from one Cloudflare zone.
 type Cloudflare struct {
 	// ZoneID is the zone's identifier, on the zone's overview page. Required.
 	ZoneID string `json:"zoneID"`
-	// APIToken is an API token with the Zone → Cache Purge permission for the
-	// zone. Required. Keep it out of a configuration file under version control.
-	APIToken string `json:"apiToken"`
+	// APITokenEnv names the environment variable holding an API token with the
+	// Zone → Cache Purge permission for the zone. It or APIToken is required;
+	// when set, it wins over APIToken.
+	APITokenEnv string `json:"apiTokenEnv"`
+	// APIToken is the token itself, set from Go.
+	APIToken string `json:"-"`
 	// BatchSize is how many URLs one purge request carries. Default 30, which is
 	// what every Cloudflare plan accepts; an Enterprise zone takes more.
 	BatchSize int `json:"batchSize"`
@@ -98,38 +98,19 @@ type Cloudflare struct {
 type Webhook struct {
 	// URL receives the POST. Required.
 	URL string `json:"url"`
-	// Token, when set, is sent as "Authorization: Bearer <token>".
-	Token string `json:"token"`
+	// TokenEnv names the environment variable holding a token sent as
+	// "Authorization: Bearer <token>". Optional; when set, it wins over Token,
+	// and an empty variable is an error.
+	TokenEnv string `json:"tokenEnv"`
+	// Token is the token itself, set from Go.
+	Token string `json:"-"`
 	// BatchSize is how many URLs one request carries. Default: all of them.
 	BatchSize int `json:"batchSize"`
 }
 
-// Duration is a time.Duration that reads from configuration as Go writes one,
-// "2s" or "500ms", as well as a number of nanoseconds.
-type Duration time.Duration
-
-// UnmarshalJSON reads "2s" or a number of nanoseconds.
-func (d *Duration) UnmarshalJSON(b []byte) error {
-	var s string
-	if err := json.Unmarshal(b, &s); err == nil {
-		v, err := time.ParseDuration(s)
-		if err != nil {
-			return fmt.Errorf("cdnpurge: %w", err)
-		}
-		*d = Duration(v)
-		return nil
-	}
-	var n int64
-	if err := json.Unmarshal(b, &n); err != nil {
-		return fmt.Errorf("cdnpurge: a duration is a string like \"2s\" or a number of nanoseconds")
-	}
-	*d = Duration(n)
-	return nil
-}
-
-// ErrNoBaseURL is returned by Init when BaseURL is not an absolute http(s) URL, or
-// is empty and neither Config.BaseURL nor an origin resolver stands in for it.
-var ErrNoBaseURL = errors.New("cdnpurge: no origin to purge under: set BaseURL (an absolute URL such as https://example.com), Config.BaseURL, or an origin resolver")
+// ErrNoBaseURL is returned by Init when the site has no origin to purge under:
+// neither Config.BaseURL nor an origin resolver.
+var ErrNoBaseURL = errors.New("cdnpurge: no origin to purge under: set Config.BaseURL (BASE_URL) or register an origin resolver")
 
 // ErrNoProvider is returned by Init when neither Cloudflare nor Webhook is set.
 var ErrNoProvider = errors.New("cdnpurge: nothing to purge: set Cloudflare or Webhook")
@@ -168,7 +149,7 @@ type target struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.2.5" }
+func (p *Plugin) Version() string { return "0.3.0" }
 
 var _ collage.CacheInvalidateHook = (*Plugin)(nil)
 
@@ -182,18 +163,13 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	p.opts = cfg
 	p.logger = host.Logger()
 	o := &p.opts
-	// The plugin's own BaseURL wins, for every entry. Without one, each entry is
-	// purged under the origin collage names for its host — a resolver plugin's,
-	// else Config.BaseURL — so a tenant site that also sets Config.BaseURL still
-	// purges each tenant's URLs under the tenant's origin.
+	// Each entry is purged under the origin collage names for its host — a
+	// resolver plugin's, else Config.BaseURL — so a tenant site that also sets
+	// Config.BaseURL still purges each tenant's URLs under the tenant's origin.
+	// With one origin for every host, it is named once, here.
+	p.base, p.origins = "", nil
 	switch {
-	case o.BaseURL != "":
-		base, err := url.Parse(o.BaseURL)
-		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
-			return ErrNoBaseURL
-		}
-		p.base = strings.TrimSuffix(o.BaseURL, "/")
-	case host.MultiOrigin() || host.BaseURL() != "":
+	case host.MultiOrigin():
 		p.origins = host
 	case host.BaseURL() != "":
 		p.base = strings.TrimSuffix(host.BaseURL(), "/")
@@ -203,20 +179,23 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	if o.Cloudflare == nil && o.Webhook == nil {
 		return ErrNoProvider
 	}
-	if o.Window <= 0 {
-		o.Window = Duration(2 * time.Second)
+	if o.Retries < 0 {
+		return fmt.Errorf("cdnpurge: retries is %d; write 0 for the default of 4, or a positive number", o.Retries)
+	}
+	if o.Window == 0 {
+		o.Window = collage.Duration(2 * time.Second)
 	}
 	if o.Retries == 0 {
 		o.Retries = 4
 	}
-	if o.Backoff <= 0 {
-		o.Backoff = Duration(time.Second)
+	if o.Backoff == 0 {
+		o.Backoff = collage.Duration(time.Second)
 	}
-	if o.Timeout <= 0 {
-		o.Timeout = Duration(10 * time.Second)
+	if o.Timeout == 0 {
+		o.Timeout = collage.Duration(10 * time.Second)
 	}
-	if o.Client == nil {
-		o.Client = &http.Client{}
+	if o.HTTPClient == nil {
+		o.HTTPClient = &http.Client{}
 	}
 	p.targets = nil
 	if cf := o.Cloudflare; cf != nil {
@@ -233,15 +212,33 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 		}
 		p.targets = append(p.targets, t)
 	}
-	p.enabled = !host.DevMode() || o.Force
+	p.enabled = !host.DevMode() || o.InDevelopment
 	p.pending = make(map[string]struct{})
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	return nil
 }
 
+// secret is the value of the environment variable env when it is named, else
+// value. A named variable that is empty is an error, never a fallback.
+func secret(env, value string) (string, error) {
+	if env == "" {
+		return value, nil
+	}
+	v := os.Getenv(env)
+	if v == "" {
+		return "", fmt.Errorf("cdnpurge: the environment variable %s is empty", env)
+	}
+	return v, nil
+}
+
 func cloudflare(cf Cloudflare) (target, error) {
+	token, err := secret(cf.APITokenEnv, cf.APIToken)
+	if err != nil {
+		return target{}, err
+	}
+	cf.APIToken = token
 	if cf.ZoneID == "" || cf.APIToken == "" {
-		return target{}, errors.New("cdnpurge: Cloudflare needs both ZoneID and APIToken")
+		return target{}, errors.New("cdnpurge: Cloudflare needs both zoneID and apiTokenEnv (or APIToken from Go)")
 	}
 	if strings.ContainsAny(cf.ZoneID, "/?#") {
 		return target{}, fmt.Errorf("cdnpurge: Cloudflare ZoneID %q is not a zone identifier", cf.ZoneID)
@@ -301,6 +298,11 @@ func cloudflare(cf Cloudflare) (target, error) {
 }
 
 func webhook(wh Webhook) (target, error) {
+	token, err := secret(wh.TokenEnv, wh.Token)
+	if err != nil {
+		return target{}, err
+	}
+	wh.Token = token
 	if err := checkURL(wh.URL); err != nil {
 		return target{}, fmt.Errorf("cdnpurge: Webhook URL: %w", err)
 	}
@@ -468,7 +470,7 @@ func (p *Plugin) attempt(ctx context.Context, t target, urls []string) (retry bo
 	if err != nil {
 		return false, 0, err
 	}
-	res, err := p.opts.Client.Do(req)
+	res, err := p.opts.HTTPClient.Do(req)
 	if err != nil {
 		return true, 0, err
 	}
