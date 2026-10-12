@@ -108,7 +108,7 @@ against a staging zone.
 
 At least one of `Cloudflare` and `Webhook` is required. No origin at all (no
 `Config.BaseURL`, no origin resolver), a provider without what it needs, an
-`*Env` variable that is empty, or an endpoint that is not an absolute URL stops
+`*Env` variable that is empty, a negative duration, `retries` or `batchSize`, or an endpoint that is not an absolute URL stops
 the application from starting. Durations are strings as Go writes them, `"2s"` or
 `"500ms"`; a bare number is an error. `endpoint` exists so a test can point the plugin at a server of its own.
 

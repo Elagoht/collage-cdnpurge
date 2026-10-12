@@ -59,15 +59,17 @@ type Options struct {
 	// takes a list of URLs.
 	Webhook *Webhook `json:"webhook"`
 	// Window is how long invalidations are collected before they are sent, so a
-	// burst of them is one request. Default "2s".
+	// burst of them is one request. Default "2s"; negative is an error.
 	Window collage.Duration `json:"window"`
 	// Retries is how many times a request the CDN answered 429 or 5xx, or that
 	// did not reach it, is tried again. Default 4; negative is an error.
 	Retries int `json:"retries"`
 	// Backoff is the wait before the first retry, doubled before each one after
-	// it. A 429's Retry-After, when longer, is honoured instead. Default "1s".
+	// it. A 429's Retry-After, when longer, is honoured instead. Default "1s";
+	// negative is an error.
 	Backoff collage.Duration `json:"backoff"`
-	// Timeout bounds one request to the CDN. Default "10s".
+	// Timeout bounds one request to the CDN. Default "10s"; negative is an
+	// error.
 	Timeout collage.Duration `json:"timeout"`
 	// InDevelopment purges from a development server too, which otherwise
 	// purges nothing.
@@ -89,6 +91,7 @@ type Cloudflare struct {
 	APIToken string `json:"-"`
 	// BatchSize is how many URLs one purge request carries. Default 30, which is
 	// what every Cloudflare plan accepts; an Enterprise zone takes more.
+	// Negative is an error.
 	BatchSize int `json:"batchSize"`
 	// Endpoint is the API's base URL. Default "https://api.cloudflare.com".
 	Endpoint string `json:"endpoint"`
@@ -104,7 +107,8 @@ type Webhook struct {
 	TokenEnv string `json:"tokenEnv"`
 	// Token is the token itself, set from Go.
 	Token string `json:"-"`
-	// BatchSize is how many URLs one request carries. Default: all of them.
+	// BatchSize is how many URLs one request carries. Default: all of them;
+	// negative is an error.
 	BatchSize int `json:"batchSize"`
 }
 
@@ -182,6 +186,14 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	if o.Retries < 0 {
 		return fmt.Errorf("cdnpurge: retries is %d; write 0 for the default of 4, or a positive number", o.Retries)
 	}
+	for _, d := range []struct {
+		key   string
+		value collage.Duration
+	}{{"window", o.Window}, {"backoff", o.Backoff}, {"timeout", o.Timeout}} {
+		if d.value < 0 {
+			return fmt.Errorf("cdnpurge: %s is %v; write 0 for the default, or a positive duration", d.key, time.Duration(d.value))
+		}
+	}
 	if o.Window == 0 {
 		o.Window = collage.Duration(2 * time.Second)
 	}
@@ -250,8 +262,11 @@ func cloudflare(cf Cloudflare) (target, error) {
 	if err := checkURL(endpoint); err != nil {
 		return target{}, fmt.Errorf("cdnpurge: Cloudflare Endpoint: %w", err)
 	}
+	if cf.BatchSize < 0 {
+		return target{}, fmt.Errorf("cdnpurge: cloudflare batchSize is %d; write 0 for the default of 30, or a positive number", cf.BatchSize)
+	}
 	batch := cf.BatchSize
-	if batch <= 0 {
+	if batch == 0 {
 		batch = 30
 	}
 	purge := endpoint + "/client/v4/zones/" + url.PathEscape(cf.ZoneID) + "/purge_cache"
@@ -303,6 +318,9 @@ func webhook(wh Webhook) (target, error) {
 		return target{}, err
 	}
 	wh.Token = token
+	if wh.BatchSize < 0 {
+		return target{}, fmt.Errorf("cdnpurge: webhook batchSize is %d; write 0 to send every URL at once, or a positive number", wh.BatchSize)
+	}
 	if err := checkURL(wh.URL); err != nil {
 		return target{}, fmt.Errorf("cdnpurge: Webhook URL: %w", err)
 	}

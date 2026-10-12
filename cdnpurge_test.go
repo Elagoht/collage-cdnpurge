@@ -420,6 +420,11 @@ func TestMisconfigurationStopsStartup(t *testing.T) {
 		"webhook without URL": {Webhook: &cdnpurge.Webhook{}},
 		"bad endpoint":        {Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t", Endpoint: "api.cloudflare.com"}},
 		"negative retries":    {Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com"}, Retries: -1},
+		"negative window":     {Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com"}, Window: collage.Duration(-time.Second)},
+		"negative backoff":    {Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com"}, Backoff: collage.Duration(-time.Second)},
+		"negative timeout":    {Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com"}, Timeout: collage.Duration(-time.Second)},
+		"negative cf batch":   {Cloudflare: &cdnpurge.Cloudflare{ZoneID: "z", APIToken: "t", BatchSize: -1}},
+		"negative hook batch": {Webhook: &cdnpurge.Webhook{URL: "https://hooks.example.com", BatchSize: -1}},
 	}
 	for name, o := range cases {
 		t.Run(name, func(t *testing.T) {

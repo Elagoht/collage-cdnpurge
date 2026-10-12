@@ -10,7 +10,7 @@
     "properties": {
       "backoff": {
         "type": "string",
-        "description": "Backoff is the wait before the first retry, doubled before each one after it. A 429's Retry-After, when longer, is honoured instead. Default \"1s\".",
+        "description": "Backoff is the wait before the first retry, doubled before each one after it. A 429's Retry-After, when longer, is honoured instead. Default \"1s\"; negative is an error.",
         "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
         "examples": [
           "30s",
@@ -27,7 +27,7 @@
           },
           "batchSize": {
             "type": "integer",
-            "description": "BatchSize is how many URLs one purge request carries. Default 30, which is what every Cloudflare plan accepts; an Enterprise zone takes more."
+            "description": "BatchSize is how many URLs one purge request carries. Default 30, which is what every Cloudflare plan accepts; an Enterprise zone takes more. Negative is an error."
           },
           "endpoint": {
             "type": "string",
@@ -50,7 +50,7 @@
       },
       "timeout": {
         "type": "string",
-        "description": "Timeout bounds one request to the CDN. Default \"10s\".",
+        "description": "Timeout bounds one request to the CDN. Default \"10s\"; negative is an error.",
         "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
         "examples": [
           "30s",
@@ -63,7 +63,7 @@
         "properties": {
           "batchSize": {
             "type": "integer",
-            "description": "BatchSize is how many URLs one request carries. Default: all of them."
+            "description": "BatchSize is how many URLs one request carries. Default: all of them; negative is an error."
           },
           "tokenEnv": {
             "type": "string",
@@ -78,7 +78,7 @@
       },
       "window": {
         "type": "string",
-        "description": "Window is how long invalidations are collected before they are sent, so a burst of them is one request. Default \"2s\".",
+        "description": "Window is how long invalidations are collected before they are sent, so a burst of them is one request. Default \"2s\"; negative is an error.",
         "pattern": "^(\\d+(\\.\\d+)?(ns|us|µs|ms|s|m|h))+$",
         "examples": [
           "30s",
