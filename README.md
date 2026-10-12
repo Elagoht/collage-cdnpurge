@@ -19,8 +19,8 @@ app, err := collage.New(&collage.Config{
 })
 ```
 
-Requires collage v0.50.0 or later: it reads `CacheInvalidateEvent.Paths`, which
-v0.23.0 added.
+Requires collage v0.60.0 or later: it reads `CacheInvalidateEvent.Entries` and
+asks the host for each entry's origin with `Host.OriginFor`.
 
 Registering it is the whole of it. Nothing changes in a page or a template.
 

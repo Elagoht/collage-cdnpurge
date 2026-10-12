@@ -138,7 +138,7 @@ var ErrNoProvider = errors.New("cdnpurge: nothing to purge: set Cloudflare or We
 type Plugin struct {
 	opts    Options
 	base    string
-	origins collage.Origins
+	origins collage.Host // names each entry's origin; nil when base is fixed
 	logger  *slog.Logger
 	targets []target
 	enabled bool
@@ -168,7 +168,7 @@ type target struct {
 func New(opts Options) *Plugin { return &Plugin{opts: opts} }
 
 func (p *Plugin) Name() string    { return Name }
-func (p *Plugin) Version() string { return "0.2.4" }
+func (p *Plugin) Version() string { return "0.2.5" }
 
 var _ collage.CacheInvalidateHook = (*Plugin)(nil)
 
@@ -186,7 +186,6 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 	// purged under the origin collage names for its host — a resolver plugin's,
 	// else Config.BaseURL — so a tenant site that also sets Config.BaseURL still
 	// purges each tenant's URLs under the tenant's origin.
-	origins, resolves := host.(collage.Origins)
 	switch {
 	case o.BaseURL != "":
 		base, err := url.Parse(o.BaseURL)
@@ -194,8 +193,8 @@ func (p *Plugin) Init(_ context.Context, host collage.Host) error {
 			return ErrNoBaseURL
 		}
 		p.base = strings.TrimSuffix(o.BaseURL, "/")
-	case resolves && (origins.Dynamic() || host.BaseURL() != ""):
-		p.origins = origins
+	case host.MultiOrigin() || host.BaseURL() != "":
+		p.origins = host
 	case host.BaseURL() != "":
 		p.base = strings.TrimSuffix(host.BaseURL(), "/")
 	default:
